@@ -13,10 +13,15 @@ from tensorflow.keras import layers
 from tensorflow_probability import distributions as tfd
 import numpy as np
 import copy
+import toml
 from datetime import datetime
+from pandas import Series
+import json
 
 tf.random.set_seed(0)
 np.random.seed(0)
+plt.style.use(['science', 'notebook', 'grid',
+               'no-latex'])  #pip install SciencePlots
 
 
 class Memory:
@@ -142,10 +147,19 @@ class PPO():
         self.BATCH_SIZE = 64
         self.N_EPOCHS = 10
 
-        self.C1 = 0.5 #0.5  #critic loss coefficient
+        self.C1 = 0.5  #0.5  #critic loss coefficient
         self.C2 = 0.001  #entropy coefficient
 
-        self.opt = tf.keras.optimizers.Adam(learning_rate=2.5e-4)
+        self.initial_learning_rate = 2.5e-4
+        self.opt = tf.keras.optimizers.Adam(
+            learning_rate=self.initial_learning_rate)
+        self.decay_lr = True
+        self.step = 0
+
+        self.lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+            initial_learning_rate=self.initial_learning_rate,
+            decay_steps=10000,
+            decay_rate=0.95)
 
         self.print_frequency = 1
         self.render = False
@@ -175,8 +189,8 @@ class PPO():
                 1 - dones[t]) * self.GAMMA * self.GAE_LAMBDA * advantages[t + 1]
 
         targets = advantages + values
-        
-        # normalize #? should this be before or after the targets?
+
+        # normalize advantages
         advantages -= tf.reduce_mean(advantages)
         advantages /= (tf.math.reduce_std(advantages) + 1e-8)
         advantages = tf.cast(advantages, dtype=tf.float32)
@@ -238,14 +252,19 @@ class PPO():
                     total_critic_loss += critic_loss
                     total_entropy_loss += entropy
 
+                if self.decay_lr:
+                    self.opt.learning_rate = self.lr_schedule(self.step).numpy()
+
                 grads = tape.gradient(loss, self.agent.trainable_variables)
                 self.opt.apply_gradients(
                     zip(grads, self.agent.trainable_variables))
 
-        self.loss_hist.append(total_loss)
-        self.actor_loss_hist.append(total_actor_loss)
-        self.critic_loss_hist.append(total_critic_loss)
-        self.entropy_hist.append(total_entropy_loss)
+                self.step += 1
+
+        self.loss_hist.append(total_loss.numpy())
+        self.actor_loss_hist.append(total_actor_loss.numpy())
+        self.critic_loss_hist.append(total_critic_loss.numpy())
+        self.entropy_hist.append(total_entropy_loss.numpy())
 
     def train(self):
 
@@ -272,6 +291,7 @@ class PPO():
             next_states = []
             dones = []
             policy_logits = []
+            self.epoch = epoch
 
             for t in range(self.TIMESTEPS):
 
@@ -314,49 +334,94 @@ class PPO():
 
             if epoch % self.print_frequency == 0:
                 print(
-                    f"Epoch: {epoch}\tLoss: {self.loss_hist[-1]:.2f}\tReward: {self.episode_reward_hist[-1]:.2f}\tMean reward: {np.mean(self.episode_reward_hist[-50:]):.2f}"
+                    f"Epoch: {epoch}\tLoss: {self.loss_hist[-1]:.2f}\tReward: {self.episode_reward_hist[-1]:.2f}\tMean reward: {np.mean(self.episode_reward_hist[-50:]):.2f}\tLearning rate: {self.opt.learning_rate.numpy():.3e}"
                 )
 
     def plot_training(self):
+
+        window = 10
+        plot_alpha = 0.7
+        blue = "#4184f3"
+        style = ':'
+
         # loss and reward
         plt.figure(figsize=(10, 7))
         plt.subplot(2, 1, 1)
-        plt.plot(self.loss_hist)
+        plt.plot(self.loss_hist,
+                 blue,
+                 linestyle=style,
+                 label="Loss",
+                 alpha=plot_alpha)
+        plt.plot(Series(self.loss_hist).rolling(window).mean(),
+                 blue,
+                 label=f"Rolling mean, {window}")
+
         plt.ylabel("Loss")
         plt.xlabel("Epochs")
-        plt.grid()
-
         plt.subplot(2, 1, 2)
-        plt.plot(self.episode_reward_hist)
+        plt.plot(self.episode_reward_hist,
+                 blue,
+                 linestyle=style,
+                 label="Reward",
+                 alpha=plot_alpha)
+        plt.plot(Series(self.episode_reward_hist).rolling(window).mean(),
+                 blue,
+                 label=f"Rolling mean, {window}")
         plt.ylabel("Episode reward")
         plt.xlabel("Training episode")
-        plt.grid()
 
         plt.savefig("training_loss_reward.png")
 
         # diagnostics
         plt.figure(figsize=(10, 12))
         plt.subplot(3, 1, 1)
-        plt.plot(self.actor_loss_hist)
+        plt.plot(self.actor_loss_hist,
+                 blue,
+                 linestyle=style,
+                 label="Loss",
+                 alpha=plot_alpha)
+        plt.plot(Series(self.actor_loss_hist).rolling(window).mean(),
+                 blue,
+                 label=f"Rolling mean, {window}")
         plt.ylabel("Actor loss")
         plt.xlabel("Epochs")
-        plt.grid()
 
         plt.subplot(3, 1, 2)
-        plt.plot(self.critic_loss_hist)
+        plt.plot(self.critic_loss_hist,
+                 blue,
+                 linestyle=style,
+                 label="Loss",
+                 alpha=plot_alpha)
+        plt.plot(Series(self.critic_loss_hist).rolling(window).mean(),
+                 blue,
+                 label=f"Rolling mean, {window}")
         plt.ylabel("Critic loss")
         plt.xlabel("Epochs")
-        plt.grid()
 
         plt.subplot(3, 1, 3)
-        plt.plot(self.entropy_hist)
+        plt.plot(self.entropy_hist,
+                 blue,
+                 linestyle=style,
+                 label="Loss",
+                 alpha=plot_alpha)
+        plt.plot(Series(self.entropy_hist).rolling(window).mean(),
+                 blue,
+                 label=f"Rolling mean, {window}")
         plt.ylabel("Entropy loss")
         plt.xlabel("Epochs")
-        plt.grid()
 
         plt.savefig("training_loss_diag.png")
 
         plt.show()
+        print()
+
+    def save_ppo_toml(self, path):
+        with open(f"{path}ppo.toml", "w") as toml_file:
+            toml.dump(self.__dict__, toml_file)
+        with open(f"{path}ppo_actor.toml", "w") as toml_file:
+            toml.dump(json.loads(self.agent.actor.to_json()), toml_file)
+        with open(f"{path}ppo_critic.toml", "w") as toml_file:
+            toml.dump(json.loads(self.agent.actor.to_json()), toml_file)
 
     def save(self):
         dt = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
@@ -364,6 +429,9 @@ class PPO():
         self.agent.actor.save_weights(f"{path}/actor")
         self.agent.critic.save_weights(f"{path}/critic")
         print("Model saved")
+
+        self.save_ppo_toml(path)
+
         return path
 
     def load(self, PATH):
@@ -428,6 +496,7 @@ if __name__ == "__main__":
     ppo = PPO(env, agent)
 
     ppo.train()
+
     ppo.plot_training()
     path = ppo.save()
 

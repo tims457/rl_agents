@@ -3,7 +3,7 @@
 
 import os
 
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 import gym
 import matplotlib.pyplot as plt
@@ -20,12 +20,10 @@ import json
 
 tf.random.set_seed(0)
 np.random.seed(0)
-plt.style.use(['science', 'notebook', 'grid',
-               'no-latex'])  #pip install SciencePlots
+plt.style.use(["science", "notebook", "grid", "no-latex"])  # pip install SciencePlots
 
 
 class Memory:
-
     def __init__(self, batch_size=32):
         self.states = []
         self.logits = []
@@ -42,14 +40,20 @@ class Memory:
         batch_start = np.arange(0, n_states, self.batch_size)
         indices = np.arange(n_states, dtype=np.int32)
         np.random.shuffle(indices)
-        batches = [indices[i:i + self.batch_size] for i in batch_start]
+        batches = [indices[i : i + self.batch_size] for i in batch_start]
 
-        return np.array(self.states), np.array(self.actions), np.array(
-            self.logits), np.array(self.vals), np.array(self.rewards), np.array(
-                self.dones), np.array(self.advantages), batches
+        return (
+            np.array(self.states),
+            np.array(self.actions),
+            np.array(self.logits),
+            np.array(self.vals),
+            np.array(self.rewards),
+            np.array(self.dones),
+            np.array(self.advantages),
+            batches,
+        )
 
-    def store_memory(self, state, action, logits, vals, reward, done,
-                     advantage):
+    def store_memory(self, state, action, logits, vals, reward, done, advantage):
         self.states.extend(state)
         self.actions.extend(action)
         self.logits.extend(logits)
@@ -69,7 +73,6 @@ class Memory:
 
 
 class Agent(tf.keras.Model):
-
     def __init__(self):
         super(Agent, self).__init__()
 
@@ -87,33 +90,49 @@ class Agent(tf.keras.Model):
 
         #         self.critic = layers.Dense(1, activation="linear", kernel_initializer=tf.keras.initializers.he_normal(), name="critic_out")
 
-        self.actor = tf.keras.Sequential([
-            layers.InputLayer(input_shape=(env.observation_space.shape[0],)),
-            layers.Dense(512,
-                         activation="relu",
-                         kernel_initializer=tf.keras.initializers.he_uniform()),
-            layers.Dense(256,
-                         activation="relu",
-                         kernel_initializer=tf.keras.initializers.he_uniform()),
-            layers.Dense(64,
-                         activation="relu",
-                         kernel_initializer=tf.keras.initializers.he_uniform()),
-            layers.Dense(env.action_space.n, activation="linear"),
-        ])
+        self.actor = tf.keras.Sequential(
+            [
+                layers.InputLayer(input_shape=(env.observation_space.shape[0],)),
+                layers.Dense(
+                    512,
+                    activation="relu",
+                    kernel_initializer=tf.keras.initializers.he_uniform(),
+                ),
+                layers.Dense(
+                    256,
+                    activation="relu",
+                    kernel_initializer=tf.keras.initializers.he_uniform(),
+                ),
+                layers.Dense(
+                    64,
+                    activation="relu",
+                    kernel_initializer=tf.keras.initializers.he_uniform(),
+                ),
+                layers.Dense(env.action_space.n, activation="linear"),
+            ]
+        )
 
-        self.critic = tf.keras.Sequential([
-            layers.InputLayer(input_shape=(env.observation_space.shape[0],)),
-            layers.Dense(512,
-                         activation="relu",
-                         kernel_initializer=tf.keras.initializers.he_uniform()),
-            layers.Dense(256,
-                         activation="relu",
-                         kernel_initializer=tf.keras.initializers.he_uniform()),
-            layers.Dense(64,
-                         activation="relu",
-                         kernel_initializer=tf.keras.initializers.he_uniform()),
-            layers.Dense(1, activation="linear")
-        ])
+        self.critic = tf.keras.Sequential(
+            [
+                layers.InputLayer(input_shape=(env.observation_space.shape[0],)),
+                layers.Dense(
+                    512,
+                    activation="relu",
+                    kernel_initializer=tf.keras.initializers.he_uniform(),
+                ),
+                layers.Dense(
+                    256,
+                    activation="relu",
+                    kernel_initializer=tf.keras.initializers.he_uniform(),
+                ),
+                layers.Dense(
+                    64,
+                    activation="relu",
+                    kernel_initializer=tf.keras.initializers.he_uniform(),
+                ),
+                layers.Dense(1, activation="linear"),
+            ]
+        )
 
     def call(self, inputs):
 
@@ -131,10 +150,10 @@ class Agent(tf.keras.Model):
         return dist, value, policy_logits
 
 
-class PPO():
-
+class PPO:
     def __init__(self, env, agent, training=True):
         self.env = env
+        self.reward_threshold = 150
         self.agent = agent
         self.training = training
 
@@ -147,24 +166,23 @@ class PPO():
         self.BATCH_SIZE = 64
         self.N_EPOCHS = 10
 
-        self.C1 = 0.5  #0.5  #critic loss coefficient
-        self.C2 = 0.001  #entropy coefficient
+        self.C1 = 1  # 0.5  #critic loss coefficient
+        self.C2 = 0.001  # entropy coefficient
 
         self.initial_learning_rate = 2.5e-4
-        self.opt = tf.keras.optimizers.Adam(
-            learning_rate=self.initial_learning_rate)
+        self.opt = tf.keras.optimizers.Adam(learning_rate=self.initial_learning_rate)
         self.decay_lr = True
         self.step = 0
 
-        self.lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-            initial_learning_rate=self.initial_learning_rate,
-            decay_steps=10000,
-            decay_rate=0.95)
+        # self.lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+        #     initial_learning_rate=self.initial_learning_rate,
+        #     decay_steps=10000,
+        #     decay_rate=0.93)
 
         self.print_frequency = 1
         self.render = False
 
-    def select_action(self, state, test=False):
+    def select_action(self, state):
         dist, value, policy_logits = self.agent(tf.expand_dims(state, axis=0))
 
         if self.training:
@@ -180,19 +198,22 @@ class PPO():
 
         deltas = np.zeros((len(rewards)))
         for t, (r, v, nv, d) in enumerate(
-                zip(rewards, values.numpy(), next_values.numpy(), dones)):
+            zip(rewards, values.numpy(), next_values.numpy(), dones)
+        ):
             deltas[t] = r + self.GAMMA * (1 - d) * nv - v
 
         advantages = copy.deepcopy(deltas)
         for t in reversed(range(len(deltas) - 1)):
-            advantages[t] = advantages[t] + (
-                1 - dones[t]) * self.GAMMA * self.GAE_LAMBDA * advantages[t + 1]
+            advantages[t] = (
+                advantages[t]
+                + (1 - dones[t]) * self.GAMMA * self.GAE_LAMBDA * advantages[t + 1]
+            )
 
         targets = advantages + values
 
         # normalize advantages
         advantages -= tf.reduce_mean(advantages)
-        advantages /= (tf.math.reduce_std(advantages) + 1e-8)
+        advantages /= tf.math.reduce_std(advantages) + 1e-8
         advantages = tf.cast(advantages, dtype=tf.float32)
 
         return advantages, targets
@@ -205,8 +226,16 @@ class PPO():
             total_actor_loss = 0
             total_critic_loss = 0
 
-            states, actions, logits_old, values, rewards, dones, advantages, batches = mem.generate_batches(
-            )
+            (
+                states,
+                actions,
+                logits_old,
+                values,
+                rewards,
+                dones,
+                advantages,
+                batches,
+            ) = mem.generate_batches()
 
             action_idx = tf.stack([tf.range(0, len(rewards)), actions], axis=1)
 
@@ -221,7 +250,8 @@ class PPO():
                     probs = tf.nn.softmax(logits)
 
                     action_idx_batch = tf.stack(
-                        [tf.range(0, len(probs)), actions[batch]], axis=1)
+                        [tf.range(0, len(probs)), actions[batch]], axis=1
+                    )
 
                     probs = tf.gather_nd(probs, action_idx_batch)
 
@@ -231,19 +261,22 @@ class PPO():
 
                     # distribution ratio
                     r_theta = tf.math.exp(
-                        probs - tf.squeeze(tf.gather(old_probs, batch)))
+                        probs - tf.squeeze(tf.gather(old_probs, batch))
+                    )
 
                     # policy clipping
                     policy_obj = r_theta * tf.gather(advantages, batch)
                     clipped_r_theta = tf.clip_by_value(
-                        r_theta, 1 - self.EPS, 1 + self.EPS) * tf.gather(
-                            advantages, batch)
+                        r_theta, 1 - self.EPS, 1 + self.EPS
+                    ) * tf.gather(advantages, batch)
                     # compute losses
                     actor_loss = -tf.reduce_mean(
-                        tf.minimum(policy_obj, clipped_r_theta))
+                        tf.minimum(policy_obj, clipped_r_theta)
+                    )
 
                     critic_loss = tf.reduce_mean(
-                        tf.square(tf.gather(targets, batch) - critic_value))
+                        tf.square(tf.gather(targets, batch) - critic_value)
+                    )
 
                     loss = actor_loss + self.C1 * critic_loss + self.C2 * entropy
 
@@ -252,12 +285,8 @@ class PPO():
                     total_critic_loss += critic_loss
                     total_entropy_loss += entropy
 
-                if self.decay_lr:
-                    self.opt.learning_rate = self.lr_schedule(self.step).numpy()
-
                 grads = tape.gradient(loss, self.agent.trainable_variables)
-                self.opt.apply_gradients(
-                    zip(grads, self.agent.trainable_variables))
+                self.opt.apply_gradients(zip(grads, self.agent.trainable_variables))
 
                 self.step += 1
 
@@ -266,9 +295,13 @@ class PPO():
         self.critic_loss_hist.append(total_critic_loss.numpy())
         self.entropy_hist.append(total_entropy_loss.numpy())
 
+        if self.decay_lr and self.epoch % 50 == 0 and self.epoch > 0:
+            # self.opt.learning_rate = self.lr_schedule(self.step).numpy()
+            # self.opt.learning_rate = self.opt.learning_rate.numpy() * 0.995
+            self.opt.learning_rate = self.opt.learning_rate.numpy() * 0.5
+
     def train(self):
 
-        self.training = True
         self.episode_reward_hist = []
         self.loss_hist = []
         self.entropy_hist = []
@@ -292,13 +325,14 @@ class PPO():
             dones = []
             policy_logits = []
             self.epoch = epoch
+            self.training = True
 
             for t in range(self.TIMESTEPS):
 
                 if self.render:
                     self.env.render()
 
-                action, value, pls = self.select_action(state, agent)
+                action, value, pls = self.select_action(state)
                 next_state, reward, done, _ = self.env.step(action)
                 episode_reward += reward
 
@@ -324,49 +358,61 @@ class PPO():
             _, next_values, _ = self.agent(np.array(next_states))
 
             advantages, targets = self.compute_advantages(
-                values, tf.squeeze(next_values), rewards, dones)
+                values, tf.squeeze(next_values), rewards, dones
+            )
 
-            mem.store_memory(states, actions, policy_logits, values, rewards,
-                             dones, advantages)
+            mem.store_memory(
+                states, actions, policy_logits, values, rewards, dones, advantages
+            )
             self.learn(mem, targets)
 
             mem.clear_memory()
 
             if epoch % self.print_frequency == 0:
+                mean_reward = np.mean(self.episode_reward_hist[-50:])
                 print(
-                    f"Epoch: {epoch}\tLoss: {self.loss_hist[-1]:.2f}\tReward: {self.episode_reward_hist[-1]:.2f}\tMean reward: {np.mean(self.episode_reward_hist[-50:]):.2f}\tLearning rate: {self.opt.learning_rate.numpy():.3e}"
+                    f"Epoch: {epoch}\tLoss: {self.loss_hist[-1]:.2f}\tReward: {self.episode_reward_hist[-1]:.2f}\tMean reward: {mean_reward:.2f}\tLearning rate: {self.opt.learning_rate.numpy():.3e}"
                 )
+
+            if epoch % 20 == 0 and epoch > 50:
+                _, test_reward = self.test(10)
+
+                if test_reward > self.reward_threshold:
+                    print(f"Solved in {epoch} epochs")
+                    break
 
     def plot_training(self):
 
         window = 10
         plot_alpha = 0.7
         blue = "#4184f3"
-        style = ':'
+        style = ":"
 
         # loss and reward
         plt.figure(figsize=(10, 7))
         plt.subplot(2, 1, 1)
-        plt.plot(self.loss_hist,
-                 blue,
-                 linestyle=style,
-                 label="Loss",
-                 alpha=plot_alpha)
-        plt.plot(Series(self.loss_hist).rolling(window).mean(),
-                 blue,
-                 label=f"Rolling mean, {window}")
+        plt.plot(self.loss_hist, blue, linestyle=style, label="Loss", alpha=plot_alpha)
+        plt.plot(
+            Series(self.loss_hist).rolling(window).mean(),
+            blue,
+            label=f"Rolling mean, {window}",
+        )
 
         plt.ylabel("Loss")
         plt.xlabel("Epochs")
         plt.subplot(2, 1, 2)
-        plt.plot(self.episode_reward_hist,
-                 blue,
-                 linestyle=style,
-                 label="Reward",
-                 alpha=plot_alpha)
-        plt.plot(Series(self.episode_reward_hist).rolling(window).mean(),
-                 blue,
-                 label=f"Rolling mean, {window}")
+        plt.plot(
+            self.episode_reward_hist,
+            blue,
+            linestyle=style,
+            label="Reward",
+            alpha=plot_alpha,
+        )
+        plt.plot(
+            Series(self.episode_reward_hist).rolling(window).mean(),
+            blue,
+            label=f"Rolling mean, {window}",
+        )
         plt.ylabel("Episode reward")
         plt.xlabel("Training episode")
 
@@ -375,45 +421,44 @@ class PPO():
         # diagnostics
         plt.figure(figsize=(10, 12))
         plt.subplot(3, 1, 1)
-        plt.plot(self.actor_loss_hist,
-                 blue,
-                 linestyle=style,
-                 label="Loss",
-                 alpha=plot_alpha)
-        plt.plot(Series(self.actor_loss_hist).rolling(window).mean(),
-                 blue,
-                 label=f"Rolling mean, {window}")
+        plt.plot(
+            self.actor_loss_hist, blue, linestyle=style, label="Loss", alpha=plot_alpha
+        )
+        plt.plot(
+            Series(self.actor_loss_hist).rolling(window).mean(),
+            blue,
+            label=f"Rolling mean, {window}",
+        )
         plt.ylabel("Actor loss")
         plt.xlabel("Epochs")
 
         plt.subplot(3, 1, 2)
-        plt.plot(self.critic_loss_hist,
-                 blue,
-                 linestyle=style,
-                 label="Loss",
-                 alpha=plot_alpha)
-        plt.plot(Series(self.critic_loss_hist).rolling(window).mean(),
-                 blue,
-                 label=f"Rolling mean, {window}")
+        plt.plot(
+            self.critic_loss_hist, blue, linestyle=style, label="Loss", alpha=plot_alpha
+        )
+        plt.plot(
+            Series(self.critic_loss_hist).rolling(window).mean(),
+            blue,
+            label=f"Rolling mean, {window}",
+        )
         plt.ylabel("Critic loss")
         plt.xlabel("Epochs")
 
         plt.subplot(3, 1, 3)
-        plt.plot(self.entropy_hist,
-                 blue,
-                 linestyle=style,
-                 label="Loss",
-                 alpha=plot_alpha)
-        plt.plot(Series(self.entropy_hist).rolling(window).mean(),
-                 blue,
-                 label=f"Rolling mean, {window}")
+        plt.plot(
+            self.entropy_hist, blue, linestyle=style, label="Loss", alpha=plot_alpha
+        )
+        plt.plot(
+            Series(self.entropy_hist).rolling(window).mean(),
+            blue,
+            label=f"Rolling mean, {window}",
+        )
         plt.ylabel("Entropy loss")
         plt.xlabel("Epochs")
 
         plt.savefig("training_loss_diag.png")
 
         plt.show()
-        print()
 
     def save_ppo_toml(self, path):
         with open(f"{path}ppo.toml", "w") as toml_file:
@@ -446,6 +491,7 @@ class PPO():
         self.training = False
         mem = Memory()
         frames = []
+        test_episode_reward_hist = []
 
         if render:
 
@@ -458,38 +504,36 @@ class PPO():
             step = 0
 
             while not done:
-                action, value, logits = self.select_action(state, test=True)
+                action, value, logits = self.select_action(state)
 
                 new_state, reward, done, info = self.env.step(action)
-                mem.store_memory([state], [action], [logits], [value], [reward],
-                                 [done], [None])
+                mem.store_memory(
+                    [state], [action], [logits], [value], [reward], [done], [None]
+                )
 
                 if render:
-                    img = plt.imshow(self.env.render('rgb_array'))
+                    img = plt.imshow(self.env.render("rgb_array"))
+                    plt.grid()
                     frames.append([img])
 
                 state = new_state
                 episode_reward += reward
                 step += 1
 
-            print(
-                f"Episode {episode} lasted {step} steps. Reward: {episode_reward}"
-            )
+            print(f"Episode {episode} lasted {step} steps. Reward: {episode_reward}")
+            test_episode_reward_hist.append(episode_reward)
 
         if render:
-            an = animation.ArtistAnimation(fig,
-                                           frames,
-                                           interval=100,
-                                           repeat_delay=1000,
-                                           blit=True)
+            an = animation.ArtistAnimation(
+                fig, frames, interval=100, repeat_delay=1000, blit=True
+            )
             writergif = animation.PillowWriter(fps=30)
             an.save("animation.gif", writer=writergif)
-        return mem
+        return mem, np.mean(test_episode_reward_hist)
 
 
 if __name__ == "__main__":
-    env = gym.make('LunarLander-v2')
-    # env = gym.make('MountainCar-v0')
+    # env = gym.make('LunarLander-v2')
     # env = gym.make('Acrobot-v1')
     # env = gym.make('CartPole-v1')
     agent = Agent()
@@ -503,3 +547,4 @@ if __name__ == "__main__":
     # ppo.load("./saved_ppo_model_2021-08-28T14-02-10")
 
     ppo.test(10, render=False)
+    ppo.test(1, render=True)

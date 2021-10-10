@@ -470,7 +470,7 @@ class PPO:
 
     def save(self):
         dt = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
-        path = f"./saved_ppo_model_{dt}/"
+        path = f"./saved_ppo_model_tf_{dt}/"
         self.agent.actor.save_weights(f"{path}/actor")
         self.agent.critic.save_weights(f"{path}/critic")
         print("Model saved")

@@ -115,7 +115,6 @@ dmypy.json
 
 *.idea
 .gitignore
-plots/
 .vscode/
 notes.py
 saved_*/

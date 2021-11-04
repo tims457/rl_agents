@@ -122,6 +122,8 @@ logs/
 wandb/
 reference/
 *.code-workspace
-*.png
 *.gif
 sweeps/
+mbrl/tmp/
+tmp/
+private/

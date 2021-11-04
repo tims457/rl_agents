@@ -1,4 +1,10 @@
-"""PPO in a learned world model. In development.
+"""
+PPO in a learned world model
+
+Simultaneously learn world model and model-free policy using world model (PPO)
+Requires a delicate balance of hyperparameters to learn both.
+
+
 """
 
 import os
@@ -74,11 +80,13 @@ class Memory:
         self.advantages = []
 
 
-# def init_weights(m):
-#     if isinstance(m, nn.Linear):
-#         torch.nn.init.xavier_uniform_(m.weight, nn.init.calculate_gain("tanh"))
-#         # m.bias.data.fill_(0.01)
-def init_weights(m):
+def init_weights_xav(m):
+    if isinstance(m, nn.Linear):
+        torch.nn.init.xavier_uniform_(m.weight, nn.init.calculate_gain("sigmoid"))
+        m.bias.data.fill_(0.01)
+
+
+def init_weights_ortho(m):
     if isinstance(m, nn.Linear):
         torch.nn.init.orthogonal_(m.weight, np.sqrt(2))
         torch.nn.init.constant_(m.bias, 0.0)
@@ -103,13 +111,14 @@ class Agent(nn.Module):
             nn.Tanh(),
             nn.Linear(64, 1),
         )
-        self.critic.apply(init_weights)
-        self.actor.apply(init_weights)
+        self.critic.apply(init_weights_ortho)
+        self.actor.apply(init_weights_ortho)
+        self.temperature = 1.0
         print(self)
 
     def forward(self, x):
         policy_logits = self.actor(x)
-        dist = Categorical(logits=policy_logits)
+        dist = Categorical(logits=policy_logits / self.temperature)
         value = self.critic(x)
 
         return dist, value, policy_logits
@@ -121,17 +130,13 @@ class Model(nn.Module):
 
         # predict next state and reward
         self.predict = nn.Sequential(
-            nn.Linear(obs_space + 1, 256),
-            nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            # nn.Dropout(0.25),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            # nn.Dropout(0.25),
-            nn.Linear(256, obs_space + 1),
+            nn.Linear(obs_space + 1, 64),
+            nn.Tanh(),
+            nn.Linear(64, 64),
+            nn.Tanh(),
+            nn.Linear(64, obs_space + 1),
         )
-        # self.predict.apply(init_weights)
+        self.predict.apply(init_weights_ortho)
         print(self)
 
     def forward(self, x):
@@ -143,6 +148,7 @@ class PPO:
         self.env = env
         self.REWARD_THRESHOLD = 150
         self.agent = agent
+        self.agent.temperature = hyp["temperature"]
         self.model = model
         self.training = training
         self.EPOCHS = hyp["epochs"]
@@ -152,6 +158,7 @@ class PPO:
         self.RENDER = False
         self.TEST_FREQ = hyp["test_freq"]
         self.RESET_STEP = hyp["reset_step"]
+        self.SCALE_REWARD = hyp["scale_reward"]
 
         # model
         # self.MODEL_INITIAL_N_EPOCHS = hyp["model_initial_n_epochs"]
@@ -159,8 +166,9 @@ class PPO:
         self.MODEL_BATCH_SIZE = hyp["model_batch_size"]
         self.MODEL_N_EPOCHS = hyp["model_n_epochs"]
         self.RESET_STEP = hyp["reset_step"]
-        self.model_loss_fn = nn.MSELoss()
+        self.model_loss_fn = nn.L1Loss()
         self.MODEL_INITIAL_LR = hyp["model_initial_lr"]
+        self.CLIP_MODEL = hyp["clip_model"]
         self.model_opt = optim.Adam(model.parameters(), lr=self.MODEL_INITIAL_LR)
         self.model_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             self.model_opt,
@@ -181,12 +189,14 @@ class PPO:
 
         self.C1 = hyp["c1"]  # 0.5  #critic loss coefficient
         self.C2 = hyp["c2"]  # entropy coefficient
+        self.clip_value = hyp["clip_value"]
+        self.V_EPS = hyp["v_eps"]
 
         self.agent_opt = torch.optim.Adam(
             [
                 {"params": self.agent.actor.parameters(), "lr": hyp["actor_lr"]},
                 {"params": self.agent.critic.parameters(), "lr": hyp["critic_lr"]},
-            ]
+            ],
         )
         self.agent_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             self.agent_opt,
@@ -196,6 +206,14 @@ class PPO:
             min_lr=1e-5,
             verbose=True,
         )
+
+    def add_scalars(self, scalars, step):
+        for key, val in scalars.items():
+            writer.add_scalar(key, val, step)
+
+    def add_histogram(self, hist, step):
+        for key, val in hist.items():
+            writer.add_histogram(key, val, step)
 
     def get_random_trajectories(self, n):
         """  Generate n random trajectories """
@@ -258,7 +276,7 @@ class PPO:
         next_states_rewards = torch.cat(
             (
                 torch.tensor(next_states, dtype=torch.float32),
-                torch.reshape(torch.tensor(rewards, dtype=torch.float32)/100, (-1, 1)),
+                torch.reshape(torch.tensor(rewards, dtype=torch.float32), (-1, 1),),
             ),
             dim=1,
         )
@@ -275,7 +293,7 @@ class PPO:
 
                 self.model_opt.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_value_(self.model.parameters(), 0.5)
+                nn.utils.clip_grad_value_(self.model.parameters(), self.CLIP_MODEL)
                 self.model_opt.step()
 
                 loss = loss.item()
@@ -283,10 +301,11 @@ class PPO:
 
                 self.global_step += 1
 
-            writer.add_scalar("training/model_loss", total_loss, self.global_step)
-            writer.add_scalar(
-                "training/model_lr",
-                self.model_opt.param_groups[0]["lr"],
+            self.add_scalars(
+                {
+                    "training/model_lr": self.model_opt.param_groups[0]["lr"],
+                    "training/model_loss": total_loss,
+                },
                 self.global_step,
             )
             if self.use_wandb:
@@ -353,15 +372,18 @@ class PPO:
                 actor_loss = -torch.mean(torch.minimum(policy_obj, clipped_r_theta))
 
                 # clip value function
-                critic_loss_unclipped = torch.square(targets[batch] - critic_value)
-                v_loss_clipped = targets[batch] + torch.clamp(
-                    critic_value - targets[batch], -0.5, 0.5
-                )
-                critic_loss_clipped = torch.square(v_loss_clipped - targets[batch])
-                v_loss_max = torch.max(critic_loss_unclipped, critic_loss_clipped)
-                critic_loss = torch.mean(v_loss_max)
-
-                # critic_loss = torch.mean(torch.square(targets[batch] - critic_value))
+                if self.clip_value:
+                    critic_loss_unclipped = torch.square(targets[batch] - critic_value)
+                    v_loss_clipped = targets[batch] + torch.clamp(
+                        critic_value - targets[batch], -self.V_EPS, self.V_EPS
+                    )
+                    critic_loss_clipped = torch.square(v_loss_clipped - targets[batch])
+                    v_loss_max = torch.max(critic_loss_unclipped, critic_loss_clipped)
+                    critic_loss = torch.mean(v_loss_max)
+                else:
+                    critic_loss = torch.mean(
+                        torch.square(targets[batch] - critic_value)
+                    )
 
                 loss = actor_loss + self.C1 * critic_loss + self.C2 * entropy
 
@@ -386,19 +408,15 @@ class PPO:
             self.actor_loss_hist.append(total_actor_loss)
             self.critic_loss_hist.append(total_critic_loss)
             self.entropy_hist.append(total_entropy_loss)
-            writer.add_scalar("training/loss", total_loss, self.global_step)
-            writer.add_scalar("training/actor_loss", total_actor_loss, self.global_step)
-            writer.add_scalar(
-                "training/critic_loss", total_critic_loss, self.global_step
+            self.add_scalars(
+                {
+                    "training/loss": total_loss,
+                    "training/actor_loss": total_actor_loss,
+                    "training/critic_loss": total_critic_loss,
+                    "training/entropy_loss": total_entropy_loss,
+                },
+                self.global_step,
             )
-            writer.add_scalar(
-                "training/entropy_loss", total_entropy_loss, self.global_step
-            )
-            # writer.add_scalar(
-            #     "training/learning_rate",
-            #     self.agent_scheduler.get_last_lr()[0],
-            #     self.global_step,
-            # )
             if self.use_wandb:
                 wandb.log(
                     {
@@ -406,7 +424,6 @@ class PPO:
                         "training/actor_loss": total_actor_loss,
                         "training/entropy": total_entropy_loss,
                         "training/critic_loss": total_critic_loss,
-                        # "training/learning_rate": self.agent_scheduler.get_last_lr()[0],
                         "time/epoch": self.epoch,
                         "time/env_step": self.env_step,
                         "time/global_step": self.global_step,
@@ -428,12 +445,13 @@ class PPO:
         episode = 1
 
         for epoch in range(self.EPOCHS):
-            state = env.reset()
+            state = true_state = env.reset()
             rewards = []
             true_rewards = []
             actions = []
             values = []
             states = []
+            true_states = []
             next_states = []
             true_next_states = []
             dones = []
@@ -441,7 +459,6 @@ class PPO:
             self.epoch = epoch
             self.training = True
             self.mem = Memory(self.AGENT_BATCH_SIZE)
-
 
             for t in range(self.TIMESTEPS):
 
@@ -464,10 +481,18 @@ class PPO:
                     .detach()
                     .numpy()
                 )
-                reward = next_state_reward_predicts[-1].detach().item()*100
+                reward = (
+                    next_state_reward_predicts[-1].detach().item() * self.SCALE_REWARD
+                )
 
                 episode_reward += reward
                 true_episode_reward += true_reward
+
+                # re-align prediction to reality
+                if (t + 1) % self.RESET_STEP == 0:
+                    state = true_state
+                    next_state = true_next_state
+                    reward = true_reward
 
                 actions.append(action)
                 values.append(value.detach().item())
@@ -481,8 +506,15 @@ class PPO:
 
                 if true_done:
                     state = true_next_state = env.reset()
+
                     self.episode_reward_hist.append(episode_reward)
                     self.true_episode_reward_hist.append(true_episode_reward)
+
+                    l = len(self.true_episode_reward_hist)
+                    mean_true_reward = np.mean(
+                        self.true_episode_reward_hist[-min(20, l) :]
+                    )
+
                     writer.add_scalar("training/reward", episode_reward)
                     writer.add_scalar("training/true_reward", true_episode_reward)
                     if self.use_wandb:
@@ -490,6 +522,7 @@ class PPO:
                             {
                                 "training/true_reward": true_episode_reward,
                                 "training/reward": episode_reward,
+                                "training/mean_true_reward": mean_true_reward,
                                 "time/global_step": self.global_step,
                                 "time/env_step": self.env_step,
                                 "time/epoch": self.epoch,
@@ -501,11 +534,7 @@ class PPO:
 
                 else:
                     state = next_state
-
-                if t % self.RESET_STEP == 0:
-                    state = true_next_state
-                    next_states[-1] = true_next_state
-                    rewards[-1] = true_reward
+                    true_state = true_next_state
 
                 self.global_step += 1
 
@@ -513,21 +542,32 @@ class PPO:
                 pltstates = np.array(states)
                 plttruestates = np.array(true_next_states)
                 plt.figure()
-                plt.subplot(2,1,1)
-                plt.plot(pltstates[:, 0], pltstates[:, 1], '.', label='states')
-                plt.plot(plttruestates[:, 0], plttruestates[:, 1], 'x', label='true_states')
-                plt.subplot(2,1,2)  
-                plt.hist([tr-r for r,tr in zip(true_rewards, rewards)], bins=100, log=True)
+                plt.subplot(2, 1, 1)
+                plt.plot(pltstates[:, 0], pltstates[:, 1], ".", label="states")
+                plt.plot(
+                    plttruestates[:, 0], plttruestates[:, 1], "x", label="true_states"
+                )
+                plt.subplot(2, 1, 2)
+                plt.hist(
+                    [tr - r for r, tr in zip(true_rewards, rewards)],
+                    bins=100,
+                    log=True,
+                    label="",
+                )
                 plt.ylabel("Count")
                 plt.xlabel("Reward error")
                 plt.legend()
-                plt.savefig(f'tmp/states_rewards_{epoch}.png')
+                plt.savefig(f"tmp/states_rewards_{epoch}.png")
                 plt.close()
                 plt.figure()
-                plt.plot(pltstates[:, 0], pltstates[:, 1], '.', label='predicted location')
-                plt.plot(plttruestates[:, 0], plttruestates[:, 1], 'x', label='true location')
+                plt.plot(
+                    pltstates[:, 0], pltstates[:, 1], ".", label="predicted location"
+                )
+                plt.plot(
+                    plttruestates[:, 0], plttruestates[:, 1], "x", label="true location"
+                )
                 plt.legend()
-                plt.savefig(f'tmp/states_{epoch}.png')
+                plt.savefig(f"tmp/states_{epoch}.png")
                 plt.close()
 
             _, next_values, _ = self.agent(
@@ -545,32 +585,27 @@ class PPO:
             self.mem.store_memory(
                 states, actions, policy_logits, values, rewards, dones, advantages
             )
-            writer.add_histogram("training/values", np.array(values), self.global_step)
-            writer.add_histogram(
-                "training/rewards", np.array(rewards), self.global_step
-            )
-            writer.add_histogram(
-                "training/true_rewards", np.array(true_rewards), self.global_step
-            )
-            writer.add_histogram("training/next_values", next_values, self.global_step)
-            writer.add_histogram("training/advantages", advantages, self.global_step)
-            writer.add_histogram("training/targets", targets, self.global_step)
-            writer.add_histogram(
-                "training/next_states", np.array(next_states), self.global_step
-            )
-            writer.add_histogram(
-                "training/true_pred_next_state_diff",
-                np.array(
-                    [
-                        np.linalg.norm(tns - ns)
-                        for tns, ns in zip(true_next_states, next_states)
-                    ]
-                ),
-                self.global_step,
-            )
-            writer.add_histogram(
-                "training/true_next_states",
-                np.array(true_next_states),
+            for name, weight in model.named_parameters():
+                writer.add_histogram(f"model/{name}", weight, self.global_step)
+            for name, weight in agent.named_parameters():
+                writer.add_histogram(f"agent/{name}", weight, self.global_step)
+            self.add_histogram(
+                {
+                    "training/values": np.array(values),
+                    "training/rewards": np.array(rewards),
+                    "training/true_rewards": np.array(true_rewards),
+                    "training/next_values": next_values,
+                    "training/advantages": advantages,
+                    "training/targets": targets,
+                    "training/next_states": np.array(next_states),
+                    "training/true_pred_next_state_diff": np.array(
+                        [
+                            np.linalg.norm(tns - ns)
+                            for tns, ns in zip(true_next_states, next_states)
+                        ]
+                    ),
+                    "training/true_next_states": np.array(true_next_states),
+                },
                 self.global_step,
             )
             self.learn(torch.tensor(targets))
@@ -701,9 +736,6 @@ class PPO:
         print(f"Model {model_path} loaded")
 
     def test(self, episodes, render=False):
-
-        # print("Testing agent")
-
         states = []
         actions = []
         rewards = []
@@ -729,10 +761,9 @@ class PPO:
                     torch.tensor(state, dtype=torch.float32), True
                 )
                 next_state, reward, done, _ = self.env.step(action)
-                # reward /= 100
+                reward /= self.SCALE_REWARD
                 # record data
                 actions.append(action)
-                # NOTE trying scaling rewards
                 rewards.append(reward)
                 states.append(state)
                 next_states.append(next_state)
@@ -796,42 +827,46 @@ if __name__ == "__main__":
     hyperparameter_defaults = dict(
         ##### general
         env=env_name,
-        epochs=500,
+        epochs=50,
         test_freq=20,
+        scale_reward=1,
         ##### model
         model_batch_size=128,
-        model_n_epochs=30,
+        model_n_epochs=40,
         model_initial_lr=0.001,
+        clip_model=0.5,
         model_decay_gamma=0.95,
         reset_step=5,
         ##### agent
+        temperature=2,
         gamma=0.99,
         gae_lambda=0.95,
-        eps=0.2,
+        eps=0.1,
         agent_batch_size=128,
-        timesteps=2000,
+        timesteps=3000,
         agent_n_epochs=40,
         c1=0.5,
         c2=0.001,
-        actor_lr=3e-4,
+        clip_value=True,
+        v_eps=0.3,
+        actor_lr=2.5e-4,
         critic_lr=1e-3,
         agent_decay_gamma=0.95,
     )
 
-    writer.add_hparams(hyperparameter_defaults, {})
     if use_wandb:
         wandb.init(
             config=hyperparameter_defaults,
             project=f"mbrl",
             group="ppo_in_learned_model",
             # name="",
-            notes=f"testing initial script {env_name} {datetime.now().strftime('%d%b%y %H:%M')}",
-            tags=["testing"],
+            notes=f"sweep {env_name} {datetime.now().strftime('%d%b%y %H:%M')}",
+            tags=["sweep"],
             magic=True,
             save_code=True,
         )
         config = wandb.config
-        # wandb.watch(agent, log_freq=100)
+        wandb.watch(agent, log_freq=100)
 
     ppo = PPO(env, agent, model, hyperparameter_defaults)
     ppo.use_wandb = use_wandb
